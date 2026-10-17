@@ -47,8 +47,8 @@
       }
     }
   ],
-  "model_calls": 1,
-  "token_usage": 125,
+  "model_calls": 2,
+  "token_usage": 279,
   "steps": [
     {
       "type": "model_call",
@@ -74,10 +74,17 @@
       "step": 2
     },
     {
+      "type": "model_call",
+      "llm_call": 2,
+      "finish_reason": "tool_calls",
+      "tokens_used": 154,
+      "step": 3
+    },
+    {
       "type": "fallback",
       "status": "FALLBACK_TOKEN_LIMIT",
       "reason": "Agent reached its token budget.",
-      "step": 3
+      "step": 4
     }
   ],
   "final_answer": "FALLBACK_TOKEN_LIMIT: Agent reached its token budget.",

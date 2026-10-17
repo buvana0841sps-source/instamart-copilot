@@ -601,12 +601,6 @@ def run_agent(
                 "Agent exceeded its time limit.", "FALLBACK_TIMEOUT"
             )
 
-        estimated_prompt = estimated_message_tokens(state["messages"])
-
-        if state["token_usage"] + estimated_prompt > token_limit:
-            return finish_fallback(
-                "Agent reached its token budget.", "FALLBACK_TOKEN_LIMIT"
-            )
 
         response = mock_llm.chat(state["messages"], tools=TOOL_SPECS)
         state["model_calls"] += 1

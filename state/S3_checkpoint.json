@@ -86,7 +86,7 @@
       "role": "tool",
       "tool_call_id": "call_4",
       "name": "escalate_to_human",
-      "content": "{\"status\": \"escalated\", \"order_id\": \"ORD-100145\", \"refund_inr\": 1999.0, \"message\": \"Sent to a human support lead for approval.\", \"ledger_entry_written\": true}"
+      "content": "{\"status\": \"already_escalated\", \"order_id\": \"ORD-100145\", \"refund_inr\": 1999.0, \"ledger_entry_written\": false}"
     }
   ],
   "tool_executions": [
@@ -154,16 +154,15 @@
         "refund_inr": 1999.0
       },
       "result": {
-        "status": "escalated",
+        "status": "already_escalated",
         "order_id": "ORD-100145",
         "refund_inr": 1999.0,
-        "message": "Sent to a human support lead for approval.",
-        "ledger_entry_written": true
+        "ledger_entry_written": false
       }
     }
   ],
   "model_calls": 5,
-  "token_usage": 1395,
+  "token_usage": 1383,
   "steps": [
     {
       "type": "model_call",
@@ -260,11 +259,10 @@
         "refund_inr": 1999.0
       },
       "result": {
-        "status": "escalated",
+        "status": "already_escalated",
         "order_id": "ORD-100145",
         "refund_inr": 1999.0,
-        "message": "Sent to a human support lead for approval.",
-        "ledger_entry_written": true
+        "ledger_entry_written": false
       },
       "step": 8
     },
@@ -272,7 +270,7 @@
       "type": "model_call",
       "llm_call": 5,
       "finish_reason": "stop",
-      "tokens_used": 407,
+      "tokens_used": 395,
       "step": 9
     },
     {

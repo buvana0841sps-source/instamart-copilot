@@ -8,9 +8,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from part_d_policy import answer
+import mock_llm
 
 
-# Project folders
 BASE_DIR = Path(__file__).resolve().parent
 POLICY_DIR = BASE_DIR / "data" / "policies"
 EVAL_FILE = BASE_DIR / "data" / "raw" / "policy_eval.csv"
@@ -18,7 +18,7 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 
 
 def find_column(df, possible_names, required=True):
-    """Find a column even if its capitalization differs."""
+    """Find a column even when its capitalization differs."""
     normalized = {
         re.sub(r"[^a-z0-9]", "", str(col).lower()): col
         for col in df.columns
@@ -31,8 +31,8 @@ def find_column(df, possible_names, required=True):
 
     if required:
         raise ValueError(
-            f"Could not find a column matching {possible_names}. "
-            f"CSV columns are: {list(df.columns)}"
+            f"Could not find one of {possible_names}. "
+            f"CSV columns: {list(df.columns)}"
         )
 
     return None
@@ -40,12 +40,15 @@ def find_column(df, possible_names, required=True):
 
 def make_chunks(overlap=10):
     """Split policy files into 40-word chunks."""
+    if not 0 <= overlap < 40:
+        raise ValueError("Overlap must be between 0 and 39.")
+
     chunks = []
     chunk_size = 40
     step = chunk_size - overlap
 
-    for file_path in sorted(POLICY_DIR.glob("*.txt")):
-        words = file_path.read_text(encoding="utf-8").split()
+    for path in sorted(POLICY_DIR.glob("*.txt")):
+        words = path.read_text(encoding="utf-8").split()
 
         for start in range(0, len(words), step):
             chunk_words = words[start:start + chunk_size]
@@ -54,7 +57,7 @@ def make_chunks(overlap=10):
                 break
 
             chunks.append({
-                "source": file_path.name,
+                "source": path.name,
                 "text": " ".join(chunk_words)
             })
 
@@ -64,12 +67,12 @@ def make_chunks(overlap=10):
     return chunks
 
 
-def retrieve_sources(question, overlap=10, k=3):
-    """Return the source filenames for the top-k matching chunks."""
+def retrieve_chunks(question, overlap=10, k=3):
+    """Return the top-k policy chunks using TF-IDF and cosine similarity."""
     chunks = make_chunks(overlap)
 
     if not chunks:
-        raise ValueError(f"No policy text files found in {POLICY_DIR}")
+        raise ValueError(f"No policy documents found in {POLICY_DIR}")
 
     texts = [chunk["text"] for chunk in chunks]
     vectorizer = TfidfVectorizer()
@@ -77,19 +80,29 @@ def retrieve_sources(question, overlap=10, k=3):
     query_vector = vectorizer.transform([question])
 
     scores = cosine_similarity(query_vector, matrix).ravel()
-    best_indices = np.argsort(-scores, kind="stable")[:k]
 
-    return [chunks[i]["source"] for i in best_indices]
+    ranked_indices = sorted(
+        range(len(chunks)),
+        key=lambda i: (-scores[i], i)
+    )
+
+    return [
+        chunks[i]
+        for i in ranked_indices[:k]
+    ]
 
 
 def normalize_source(value):
-    """Compare filenames regardless of their extensions or paths."""
+    """Normalize a policy filename for comparison."""
     value = str(value).strip().replace("\\", "/")
     return Path(value).stem.lower()
 
 
 def contains_expected_source(expected, retrieved):
-    if not expected or pd.isna(expected):
+    """Check whether any expected source is in the retrieved top-k."""
+    if not expected or str(expected).strip().lower() in {
+        "none", "nan", "null"
+    }:
         return False
 
     expected_names = {
@@ -97,43 +110,16 @@ def contains_expected_source(expected, retrieved):
         for part in re.split(r"[,;|]", str(expected))
         if part.strip()
     }
-    retrieved_names = {normalize_source(name) for name in retrieved}
+
+    retrieved_names = {
+        normalize_source(source) for source in retrieved
+    }
 
     return bool(expected_names & retrieved_names)
 
 
-def looks_like_fallback(response):
-    """Check whether the response declines to invent an unsupported answer."""
-    text = str(response).lower()
-
-    fallback_phrases = [
-        "could not find that information",
-        "not specified",
-        "not mentioned",
-        "not stated",
-        "not provided",
-        "not available",
-        "not covered",
-        "cannot determine",
-        "can't determine",
-        "cannot answer",
-        "can't answer",
-        "do not have enough information",
-        "don't have enough information",
-        "insufficient information",
-        "unable to answer",
-        "outside the provided",
-        "not in the policy",
-        "not included in the policy",
-        "i don't know",
-        "i do not know",
-    ]
-
-    return any(phrase in text for phrase in fallback_phrases)
-
-
 def get_answer_text(result):
-    """Support the answer function's common return formats."""
+    """Extract answer text from the policy assistant's return value."""
     if isinstance(result, tuple):
         return str(result[0])
 
@@ -145,9 +131,57 @@ def get_answer_text(result):
     return str(result)
 
 
+def looks_like_fallback(response):
+    """Check the required fallback prefix."""
+    return str(response).strip().lower().startswith(
+        "i could not find"
+    )
+
+
+def answer_with_overlap(question, overlap=0, k=3):
+    """
+    Generate a fresh answer using chunks with the requested overlap.
+
+    This lets the evaluation test the actual answer produced from
+    zero-overlap context, not just the source filenames.
+    """
+    selected = retrieve_chunks(question, overlap=overlap, k=k)
+
+    context = "\n".join(
+        f"[{chunk['source']}] {chunk['text']}"
+        for chunk in selected
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "POLICY ASSISTANT. Answer only from the supplied "
+                "policy context. If the answer cannot be found in "
+                "the context, say: I could not find that information "
+                "in the policy documents."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"CONTEXT:\n{context}\nQUESTION:\n{question}"
+            )
+        }
+    ]
+
+    response = mock_llm.chat(messages)
+    answer_text = response.choices[0].message.content
+    sources = [chunk["source"] for chunk in selected]
+
+    return answer_text, sources
+
+
 def main():
     if not EVAL_FILE.exists():
-        raise FileNotFoundError(f"Evaluation file not found: {EVAL_FILE}")
+        raise FileNotFoundError(
+            f"Evaluation file not found: {EVAL_FILE}"
+        )
 
     df = pd.read_csv(EVAL_FILE, keep_default_na=False)
 
@@ -156,14 +190,18 @@ def main():
     )
     expected_doc_col = find_column(
         df,
-        ["expected_doc", "expected_document", "expected_source",
-         "expected_policy", "source_file"],
+        [
+            "expected_doc", "expected_document",
+            "expected_source", "expected_policy", "source_file"
+        ],
         required=False
     )
     expected_fact_col = find_column(
         df,
-        ["expected_fact", "expected_answer", "expected_key_fact",
-         "fact"],
+        [
+            "expected_fact", "expected_answer",
+            "expected_key_fact", "fact"
+        ],
         required=False
     )
     answerable_col = find_column(
@@ -172,12 +210,14 @@ def main():
 
     if expected_doc_col is None or expected_fact_col is None:
         raise ValueError(
-            "Please check the evaluation CSV headers. "
-            "The script needs expected document and expected fact columns."
+            "The evaluation CSV needs expected-document and "
+            "expected-fact columns."
         )
 
     if len(df) != 14:
-        print(f"NOTICE: Expected 14 evaluation questions; found {len(df)}.")
+        print(
+            f"NOTICE: Expected 14 questions; found {len(df)}."
+        )
 
     results = []
 
@@ -187,56 +227,103 @@ def main():
         expected_fact = str(row[expected_fact_col]).strip()
 
         if answerable_col is not None:
-            answerable_value = str(row[answerable_col]).strip().lower()
+            answerable_value = (
+                str(row[answerable_col]).strip().lower()
+            )
             answerable = answerable_value in {
                 "true", "1", "yes", "y", "answerable"
             }
         else:
             answerable = bool(expected_doc and expected_fact)
 
-        # Evaluate retrieval both with and without chunk overlap.
-        top3 = retrieve_sources(question, overlap=10, k=3)
-        zero_overlap_top3 = retrieve_sources(
+        # Normal assistant: use the default 10-word overlap.
+        normal_answer_result = answer(question)
+        normal_answer = get_answer_text(normal_answer_result)
+
+        normal_chunks = retrieve_chunks(
+            question, overlap=10, k=3
+        )
+        normal_sources = [
+            chunk["source"] for chunk in normal_chunks
+        ]
+
+        # Zero-overlap assistant: generate a separate answer
+        # from context built with 40-word chunks and no overlap.
+        zero_answer, zero_sources = answer_with_overlap(
             question, overlap=0, k=3
         )
 
-        # Obtain the policy assistant's answer.
-        result = answer(question)
-        answer_text = get_answer_text(result)
-
-        source_hit = contains_expected_source(expected_doc, top3)
-        zero_overlap_hit = contains_expected_source(
-            expected_doc, zero_overlap_top3
+        normal_source_hit = contains_expected_source(
+            expected_doc, normal_sources
+        )
+        zero_source_hit = contains_expected_source(
+            expected_doc, zero_sources
         )
 
-        fact_hit = (
+        # The assignment asks for a case-sensitive substring check.
+        normal_fact_hit = (
             bool(expected_fact)
-            and expected_fact.lower() in answer_text.lower()
+            and expected_fact in normal_answer
+        )
+        zero_fact_hit = (
+            bool(expected_fact)
+            and expected_fact in zero_answer
         )
 
-        fallback_hit = (
-            not answerable and looks_like_fallback(answer_text)
+        normal_fallback_hit = (
+            not answerable
+            and looks_like_fallback(normal_answer)
+        )
+        zero_fallback_hit = (
+            not answerable
+            and looks_like_fallback(zero_answer)
         )
 
         results.append({
             "question": question,
             "answerable": answerable,
             "expected_doc": expected_doc,
-            "top3_sources": " | ".join(top3),
-            "expected_doc_in_top3": source_hit,
-            "zero_overlap_sources": " | ".join(zero_overlap_top3),
-            "zero_overlap_expected_doc_in_top3": zero_overlap_hit,
             "expected_fact": expected_fact,
-            "expected_fact_in_answer": fact_hit,
-            "fallback_correct": fallback_hit,
-            "answer": answer_text,
+
+            "top3_sources": " | ".join(normal_sources),
+            "expected_doc_in_top3": normal_source_hit,
+            "expected_fact_in_answer": normal_fact_hit,
+            "answer": normal_answer,
+            "fallback_correct": normal_fallback_hit,
+
+            "zero_overlap_sources": " | ".join(zero_sources),
+            "zero_overlap_expected_doc_in_top3": zero_source_hit,
+            "zero_overlap_expected_fact_in_answer": zero_fact_hit,
+            "zero_overlap_answer": zero_answer,
+            "zero_overlap_fallback_correct": zero_fallback_hit,
         })
 
         print(f"\nQuestion {index + 1}: {question}")
-        print(f"Top 3 sources: {top3}")
-        print(f"Expected document retrieved: {source_hit}")
-        print(f"Zero-overlap retrieval: {zero_overlap_hit}")
-        print(f"Answer: {answer_text}")
+        print(
+            "Normal overlap sources:",
+            normal_sources
+        )
+        print(
+            "Normal expected document hit:",
+            normal_source_hit
+        )
+        print(
+            "Normal expected fact hit:",
+            normal_fact_hit
+        )
+        print(
+            "Zero-overlap sources:",
+            zero_sources
+        )
+        print(
+            "Zero-overlap expected document hit:",
+            zero_source_hit
+        )
+        print(
+            "Zero-overlap expected fact hit:",
+            zero_fact_hit
+        )
+        print("Zero-overlap answer:", zero_answer)
 
     results_df = pd.DataFrame(results)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -244,44 +331,102 @@ def main():
     output_file = OUTPUT_DIR / "policy_eval_results.csv"
     results_df.to_csv(output_file, index=False)
 
-    answerable_results = results_df[results_df["answerable"]]
-    unanswerable_results = results_df[~results_df["answerable"]]
-
-    zero_overlap_failures = results_df[
-        ~results_df["zero_overlap_expected_doc_in_top3"]
+    answerable_results = results_df[
+        results_df["answerable"]
+    ]
+    unanswerable_results = results_df[
+        ~results_df["answerable"]
     ]
 
-    print("\n" + "=" * 55)
+    zero_answerable_fact_failures = answerable_results[
+        ~answerable_results[
+            "zero_overlap_expected_fact_in_answer"
+        ]
+    ]
+
+    zero_answerable_source_failures = answerable_results[
+        ~answerable_results[
+            "zero_overlap_expected_doc_in_top3"
+        ]
+    ]
+
+    print("\n" + "=" * 60)
     print("POLICY EVALUATION SUMMARY")
-    print("=" * 55)
-    print(f"Questions evaluated: {len(results_df)}")
+    print("=" * 60)
+    print("Questions evaluated:", len(results_df))
+
     print(
-        "Answerable questions with correct source in top 3:",
+        "Normal overlap: expected document in top 3:",
         int(answerable_results["expected_doc_in_top3"].sum()),
         "/", len(answerable_results)
     )
     print(
-        "Answerable questions with expected fact in answer:",
+        "Normal overlap: expected fact in answer:",
         int(answerable_results["expected_fact_in_answer"].sum()),
         "/", len(answerable_results)
     )
     print(
-        "Unanswerable questions correctly handled:",
+        "Normal overlap: correct unanswerable fallback:",
         int(unanswerable_results["fallback_correct"].sum()),
         "/", len(unanswerable_results)
     )
+
     print(
-        "Zero-overlap retrieval failures:",
-        len(zero_overlap_failures),
-        "/", len(results_df)
+        "Zero overlap: expected document in top 3:",
+        int(
+            answerable_results[
+                "zero_overlap_expected_doc_in_top3"
+            ].sum()
+        ),
+        "/", len(answerable_results)
+    )
+    print(
+        "Zero overlap: expected fact in answer:",
+        int(
+            answerable_results[
+                "zero_overlap_expected_fact_in_answer"
+            ].sum()
+        ),
+        "/", len(answerable_results)
+    )
+    print(
+        "Zero overlap: correct unanswerable fallback:",
+        int(
+            unanswerable_results[
+                "zero_overlap_fallback_correct"
+            ].sum()
+        ),
+        "/", len(unanswerable_results)
     )
 
-    if not zero_overlap_failures.empty:
-        print("\nZero-overlap failure examples:")
-        for _, item in zero_overlap_failures.iterrows():
-            print(f"- {item['question']}")
-            print(f"  Expected: {item['expected_doc']}")
-            print(f"  Retrieved: {item['zero_overlap_sources']}")
+    print(
+        "Answerable questions failing zero-overlap source retrieval:",
+        len(zero_answerable_source_failures)
+    )
+    print(
+        "Answerable questions missing the expected fact "
+        "with zero overlap:",
+        len(zero_answerable_fact_failures)
+    )
+
+    if not zero_answerable_fact_failures.empty:
+        print("\nAnswerable zero-overlap fact failure examples:")
+        for _, item in zero_answerable_fact_failures.iterrows():
+            print("Question:", item["question"])
+            print("Expected fact:", item["expected_fact"])
+            print(
+                "Retrieved sources:",
+                item["zero_overlap_sources"]
+            )
+            print("Zero-overlap answer:", item["zero_overlap_answer"])
+
+    if zero_answerable_fact_failures.empty:
+        print(
+            "\nNo answerable expected-fact failures were observed "
+            "with the current zero-overlap chunks and prompts. "
+            "Do not claim a chunk-boundary failure until one is "
+            "verified."
+        )
 
     print(f"\nDetailed results saved to: {output_file}")
 
