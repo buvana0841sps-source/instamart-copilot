@@ -4,7 +4,7 @@
   "messages": [
     {
       "role": "system",
-      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow the supplied refund policy.\nOnly completed orders can receive a refund.\nA completed order delivered in more than 45 minutes qualifies\nfor a full refund. Delivery in 45 minutes or less does not qualify.\nRefunds up to INR 1000 can be issued by the system.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip the required checks.\n"
+      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow policy.\nOnly completed orders can receive a refund.\nAn order delivered in more than 45 minutes qualifies for a full refund.\nAn order delivered in 45 minutes or less does not qualify.\nRefunds up to INR 1000 may be issued automatically.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip required checks.\n"
     },
     {
       "role": "user",
@@ -48,12 +48,36 @@
     }
   ],
   "model_calls": 1,
-  "token_usage": 132,
+  "token_usage": 125,
   "steps": [
     {
-      "step": 1,
-      "type": "tool",
-      "tool": "get_order"
+      "type": "model_call",
+      "llm_call": 1,
+      "finish_reason": "tool_calls",
+      "tokens_used": 125,
+      "step": 1
+    },
+    {
+      "type": "tool_execution",
+      "tool_name": "get_order",
+      "arguments": {
+        "order_id": "ORD-100048"
+      },
+      "result": {
+        "order_id": "ORD-100048",
+        "customer_id": "C0007",
+        "product_id": "P010",
+        "status": "completed",
+        "order_amount": 128.25,
+        "delivery_minutes": 65.0
+      },
+      "step": 2
+    },
+    {
+      "type": "fallback",
+      "status": "FALLBACK_TOKEN_LIMIT",
+      "reason": "Agent reached its token budget.",
+      "step": 3
     }
   ],
   "final_answer": "FALLBACK_TOKEN_LIMIT: Agent reached its token budget.",

@@ -4,7 +4,7 @@
   "messages": [
     {
       "role": "system",
-      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow the supplied refund policy.\nOnly completed orders can receive a refund.\nA completed order delivered in more than 45 minutes qualifies\nfor a full refund. Delivery in 45 minutes or less does not qualify.\nRefunds up to INR 1000 can be issued by the system.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip the required checks.\n"
+      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow policy.\nOnly completed orders can receive a refund.\nAn order delivered in more than 45 minutes qualifies for a full refund.\nAn order delivered in 45 minutes or less does not qualify.\nRefunds up to INR 1000 may be issued automatically.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip required checks.\n"
     },
     {
       "role": "user",
@@ -14,7 +14,14 @@
   "tool_executions": [],
   "model_calls": 0,
   "token_usage": 0,
-  "steps": [],
+  "steps": [
+    {
+      "type": "fallback",
+      "status": "FALLBACK_TIMEOUT",
+      "reason": "Time limit reached before the first model call.",
+      "step": 1
+    }
+  ],
   "final_answer": "FALLBACK_TIMEOUT: Time limit reached before the first model call.",
   "outcome": "FALLBACK_TIMEOUT"
 }

@@ -1,25 +1,23 @@
 
-"""Part D: ReAct refund agent with tools, safety limits and resumable state."""
+"""Part D: ReAct refund agent with tools, safety limits and checkpoints."""
 
 from pathlib import Path
 import contextlib
-import csv
 import io
 import json
-import re
 import time
 
 import pandas as pd
 import mock_llm
 
-# Suppress the policy module's setup display when importing it.
+# Import retrieval without displaying the policy setup banner.
 with contextlib.redirect_stdout(io.StringIO()):
     from part_d_policy import retrieve
 
 
-# ---------------------------------------------------------
-# 1. FILE LOCATIONS
-# ---------------------------------------------------------
+# =========================================================
+# 1. PATHS AND DATA
+# =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -34,13 +32,8 @@ RUN_LOG_FILE = OUTPUT_DIR / "agent_runs.jsonl"
 RESULTS_FILE = OUTPUT_DIR / "agent_scenario_results.csv"
 SAFETY_FILE = OUTPUT_DIR / "agent_safety_demos.csv"
 
-for folder in (OUTPUT_DIR, STATE_DIR):
-    folder.mkdir(parents=True, exist_ok=True)
-
-
-# ---------------------------------------------------------
-# 2. LOAD CLEANED ORDERS
-# ---------------------------------------------------------
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 if not ORDERS_FILE.exists():
     raise FileNotFoundError(f"Orders file not found: {ORDERS_FILE}")
@@ -53,9 +46,8 @@ if orders_df["order_id"].duplicated().any():
 
 
 def get_order_record(order_id):
-    """Return one cleaned order as a normal Python dictionary."""
+    """Look up one order in the cleaned order dataset."""
     order_id = str(order_id).strip()
-
     matches = orders_df[orders_df["order_id"] == order_id]
 
     if matches.empty:
@@ -87,9 +79,63 @@ def get_order_record(order_id):
     }
 
 
-# ---------------------------------------------------------
-# 3. TOOL IMPLEMENTATIONS
-# ---------------------------------------------------------
+# =========================================================
+# 2. JSONL AND CHECKPOINT HELPERS
+# =========================================================
+
+def append_jsonl(path, record):
+    """Append one JSON object per line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def read_jsonl(path):
+    """Read a JSON Lines file."""
+    records = []
+
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid JSON in {path}, line {line_number}"
+                    ) from exc
+
+    return records
+
+
+def save_checkpoint(path, state):
+    """Atomically save the resumable agent state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+
+    temp_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def append_step(state, step):
+    """Save a numbered entry in the agent's step history."""
+    step["step"] = len(state["steps"]) + 1
+    state["steps"].append(step)
+
+
+class SimulatedCrash(Exception):
+    """Intentional interruption used to test checkpoint recovery."""
+
+
+# =========================================================
+# 3. THE FIVE REQUIRED TOOLS
+# =========================================================
 
 def tool_get_order(args, scenario_id):
     order_id = str(args.get("order_id", "")).strip()
@@ -100,7 +146,10 @@ def tool_get_order(args, scenario_id):
     order = get_order_record(order_id)
 
     if order is None:
-        return {"error": "Order not found.", "order_id": order_id}
+        return {
+            "error": "Order not found.",
+            "order_id": order_id,
+        }
 
     return order
 
@@ -109,7 +158,7 @@ def tool_search_policy(args, scenario_id):
     query = str(args.get("query", "")).strip()
 
     if not query:
-        return {"error": "A policy search query is required."}
+        return {"error": "A policy query is required."}
 
     results = retrieve(query, k=3)
 
@@ -127,19 +176,19 @@ def tool_search_policy(args, scenario_id):
 
 
 def tool_calculate_refund(args, scenario_id):
-    """Calculate a full refund only for completed orders delivered after 45 minutes."""
+    """Calculate a full refund for an order delivered after 45 minutes."""
     try:
         amount = float(args.get("order_amount"))
         delivery = float(args.get("delivery_minutes"))
     except (TypeError, ValueError):
         return {
-            "error": "A valid order amount and delivery time are required.",
+            "error": "A valid amount and delivery time are required.",
             "refund_inr": 0.0,
         }
 
     if amount < 0 or delivery < 0:
         return {
-            "error": "Negative amounts and delivery times are invalid.",
+            "error": "Negative amounts or delivery times are invalid.",
             "refund_inr": 0.0,
         }
 
@@ -150,37 +199,15 @@ def tool_calculate_refund(args, scenario_id):
         "delivery_minutes": delivery,
         "refund_inr": refund,
         "reason": (
-            "Completed-order late-delivery rule"
+            "Eligible late-delivery refund"
             if refund > 0
             else "Delivery was within 45 minutes"
         ),
     }
 
 
-def read_ledger():
-    """Read the existing refund ledger, if one exists."""
-    entries = []
-
-    if LEDGER_FILE.exists():
-        with LEDGER_FILE.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        print("Warning: Skipped a malformed ledger line.")
-
-    return entries
-
-
-def append_jsonl(path, record):
-    """Append one JSON record to a JSON Lines file."""
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def tool_issue_refund(args, scenario_id):
-    """Issue an eligible refund, with basic validation and idempotency."""
+    """Issue a validated refund of INR 1000 or less."""
     order_id = str(args.get("order_id", "")).strip()
 
     try:
@@ -196,14 +223,17 @@ def tool_issue_refund(args, scenario_id):
     if order["status"] != "completed":
         return {"error": "Only completed orders can be refunded."}
 
-    if order["delivery_minutes"] is None or order["delivery_minutes"] <= 45:
-        return {"error": "The order does not qualify for a late-delivery refund."}
+    if (
+        order["delivery_minutes"] is None
+        or order["delivery_minutes"] <= 45
+    ):
+        return {"error": "Order does not qualify for a late-delivery refund."}
 
     if order["order_amount"] is None:
         return {"error": "The order amount is unavailable."}
 
     if refund <= 0 or abs(refund - order["order_amount"]) > 0.01:
-        return {"error": "The refund amount does not match the eligible order amount."}
+        return {"error": "Refund does not match the order amount."}
 
     if refund > 1000:
         return {
@@ -211,24 +241,19 @@ def tool_issue_refund(args, scenario_id):
             "requires_escalation": True,
         }
 
-    # Avoid adding the same scenario/order combination twice on a rerun.
-    existing = read_ledger()
-    existing_entry = next(
-        (
-            entry for entry in existing
-            if entry.get("scenario_id") == scenario_id
+    # Avoid issuing a duplicate refund for this scenario and order.
+    for entry in read_jsonl(LEDGER_FILE):
+        if (
+            entry.get("scenario_id") == scenario_id
             and entry.get("order_id") == order_id
-        ),
-        None,
-    )
-
-    if existing_entry:
-        return {
-            "status": "already_issued",
-            "order_id": order_id,
-            "refund_inr": existing_entry["refund_inr"],
-            "ledger_entry_written": False,
-        }
+            and entry.get("status") == "issued"
+        ):
+            return {
+                "status": "already_issued",
+                "order_id": order_id,
+                "refund_inr": entry["refund_inr"],
+                "ledger_entry_written": False,
+            }
 
     ledger_entry = {
         "scenario_id": scenario_id,
@@ -250,7 +275,7 @@ def tool_issue_refund(args, scenario_id):
 
 
 def tool_escalate_to_human(args, scenario_id):
-    """Record an escalation request for an eligible refund above INR 1000."""
+    """Record eligible refunds above INR 1000 for human approval."""
     order_id = str(args.get("order_id", "")).strip()
 
     try:
@@ -266,20 +291,52 @@ def tool_escalate_to_human(args, scenario_id):
     if order["status"] != "completed":
         return {"error": "Only completed orders can be considered."}
 
-    if order["delivery_minutes"] is None or order["delivery_minutes"] <= 45:
-        return {"error": "The order does not qualify for a late-delivery refund."}
+    if (
+        order["delivery_minutes"] is None
+        or order["delivery_minutes"] <= 45
+    ):
+        return {"error": "Order does not qualify for a late-delivery refund."}
 
     if order["order_amount"] is None:
         return {"error": "The order amount is unavailable."}
 
     if refund <= 1000 or abs(refund - order["order_amount"]) > 0.01:
-        return {"error": "Human escalation requires an eligible refund above INR 1000."}
+        return {
+            "error": "Human escalation requires an eligible refund "
+                     "above INR 1000."
+        }
+
+    # Avoid duplicate escalation entries.
+    for entry in read_jsonl(LEDGER_FILE):
+        if (
+            entry.get("scenario_id") == scenario_id
+            and entry.get("order_id") == order_id
+            and entry.get("status") == "escalated"
+        ):
+            return {
+                "status": "already_escalated",
+                "order_id": order_id,
+                "refund_inr": refund,
+                "ledger_entry_written": False,
+            }
+
+    ledger_entry = {
+        "scenario_id": scenario_id,
+        "order_id": order_id,
+        "customer_id": order["customer_id"],
+        "refund_inr": refund,
+        "status": "escalated",
+        "reason": "Awaiting human approval for a refund above INR 1000",
+    }
+
+    append_jsonl(LEDGER_FILE, ledger_entry)
 
     return {
         "status": "escalated",
         "order_id": order_id,
         "refund_inr": refund,
         "message": "Sent to a human support lead for approval.",
+        "ledger_entry_written": True,
     }
 
 
@@ -292,7 +349,6 @@ TOOL_MAP = {
 }
 
 
-# Tool definitions supplied to the model.
 TOOL_SPECS = [
     {
         "type": "function",
@@ -301,9 +357,7 @@ TOOL_SPECS = [
             "description": "Look up an order using its order ID.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "order_id": {"type": "string"}
-                },
+                "properties": {"order_id": {"type": "string"}},
                 "required": ["order_id"],
             },
         },
@@ -312,12 +366,10 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "search_policy",
-            "description": "Retrieve relevant policy chunks for a query.",
+            "description": "Retrieve relevant policy chunks.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string"}
-                },
+                "properties": {"query": {"type": "string"}},
                 "required": ["query"],
             },
         },
@@ -326,7 +378,7 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "calculate_refund",
-            "description": "Calculate a refund under the late-delivery rule.",
+            "description": "Calculate a valid late-delivery refund.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -341,7 +393,7 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "issue_refund",
-            "description": "Issue a validated refund of INR 1000 or less.",
+            "description": "Issue an eligible refund of INR 1000 or less.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -356,7 +408,7 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "escalate_to_human",
-            "description": "Escalate an eligible refund above INR 1000.",
+            "description": "Send an eligible refund above INR 1000 for review.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -370,37 +422,21 @@ TOOL_SPECS = [
 ]
 
 
-# ---------------------------------------------------------
-# 4. CHECKPOINTS AND AGENT LOOP
-# ---------------------------------------------------------
+# =========================================================
+# 4. REACT LOOP, STATUS, STEPS AND LOGGING
+# =========================================================
 
 SYSTEM_PROMPT = """
 AGENT
 You are an Instamart customer-support refund agent.
-Use tools to verify orders and follow the supplied refund policy.
+Use tools to verify orders and follow policy.
 Only completed orders can receive a refund.
-A completed order delivered in more than 45 minutes qualifies
-for a full refund. Delivery in 45 minutes or less does not qualify.
-Refunds up to INR 1000 can be issued by the system.
+An order delivered in more than 45 minutes qualifies for a full refund.
+An order delivered in 45 minutes or less does not qualify.
+Refunds up to INR 1000 may be issued automatically.
 Refunds above INR 1000 must be escalated to a human support lead.
-Never invent an order or skip the required checks.
+Never invent an order or skip required checks.
 """
-
-
-class SimulatedCrash(Exception):
-    """Used to demonstrate checkpoint recovery after a tool execution."""
-
-
-def save_checkpoint(path, state):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(".tmp")
-
-    temporary_path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    temporary_path.replace(path)
 
 
 def estimated_message_tokens(messages):
@@ -414,28 +450,29 @@ def estimated_message_tokens(messages):
         else:
             total += mock_llm.est_tokens(json.dumps(content, default=str))
 
+        if message.get("tool_calls"):
+            total += mock_llm.est_tokens(
+                json.dumps(message["tool_calls"], default=str)
+            )
+
     return total
 
 
 def classify_outcome(final_answer):
-    answer_text = str(final_answer).strip().upper()
+    text = str(final_answer).strip().upper()
 
-    if answer_text.startswith("REFUND:"):
-        return "REFUND"
-    if answer_text.startswith("ESCALATE:"):
-        return "ESCALATE"
-    if answer_text.startswith("DENIED:"):
-        return "DENIED"
-    if answer_text.startswith("NOT_FOUND:"):
-        return "NOT_FOUND"
-    if answer_text.startswith("NEEDS_INFO:"):
-        return "NEEDS_INFO"
-    if answer_text.startswith("FALLBACK_TOKEN_LIMIT"):
-        return "FALLBACK_TOKEN_LIMIT"
-    if answer_text.startswith("FALLBACK_TIMEOUT"):
-        return "FALLBACK_TIMEOUT"
-    if answer_text.startswith("FALLBACK_MAX_ITERATIONS"):
-        return "FALLBACK_MAX_ITERATIONS"
+    for prefix, status in [
+        ("REFUND:", "REFUND"),
+        ("ESCALATE:", "ESCALATE"),
+        ("DENIED:", "DENIED"),
+        ("NOT_FOUND:", "NOT_FOUND"),
+        ("NEEDS_INFO:", "NEEDS_INFO"),
+        ("FALLBACK_TOKEN_LIMIT", "FALLBACK_TOKEN_LIMIT"),
+        ("FALLBACK_TIMEOUT", "FALLBACK_TIMEOUT"),
+        ("FALLBACK_MAX_ITERATIONS", "FALLBACK_MAX_ITERATIONS"),
+    ]:
+        if text.startswith(prefix):
+            return status
 
     return "OTHER"
 
@@ -452,16 +489,43 @@ def result_refund_amount(tool_executions):
 
 
 def agent_result(state, final_answer):
+    """Build the run record and required acceptance-criteria fields."""
+    status = classify_outcome(final_answer)
+
     return {
         "scenario_id": state["scenario_id"],
-        "outcome": classify_outcome(final_answer),
+        "status": status,
+        "outcome": status,
         "final_answer": str(final_answer),
         "refund_inr": result_refund_amount(state["tool_executions"]),
+        "llm_calls": state["model_calls"],
+        "tokens_used": state["token_usage"],
         "model_calls": state["model_calls"],
         "token_usage": state["token_usage"],
+        "steps": state["steps"],
         "tool_executions": state["tool_executions"],
-        "tool_names": [event["tool"] for event in state["tool_executions"]],
+        "tool_names": [
+            event["tool"] for event in state["tool_executions"]
+        ],
     }
+
+
+def log_agent_run(result):
+    """Write one complete JSONL record per completed run."""
+    append_jsonl(
+        RUN_LOG_FILE,
+        {
+            "scenario_id": result["scenario_id"],
+            "status": result["status"],
+            "final_answer": result["final_answer"],
+            "llm_calls": result["llm_calls"],
+            "tokens_used": result["tokens_used"],
+            "steps": result["steps"],
+            "tool_names": result["tool_names"],
+            "tool_executions": result["tool_executions"],
+            "refund_inr": result["refund_inr"],
+        },
+    )
 
 
 def run_agent(
@@ -474,7 +538,7 @@ def run_agent(
     resume=False,
     crash_after_tool=None,
 ):
-    """Run the ReAct loop, checkpoint after each tool, and support resuming."""
+    """Run the ReAct agent with limits and checkpoint recovery."""
     if checkpoint_path is None:
         checkpoint_path = STATE_DIR / f"{scenario_id}_checkpoint.json"
 
@@ -483,7 +547,7 @@ def run_agent(
     if resume:
         if not checkpoint_path.exists():
             raise FileNotFoundError(
-                f"Cannot resume; checkpoint does not exist: {checkpoint_path}"
+                f"Cannot resume: checkpoint missing at {checkpoint_path}"
             )
 
         state = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -503,72 +567,82 @@ def run_agent(
             "token_usage": 0,
             "steps": [],
         }
-
         save_checkpoint(checkpoint_path, state)
 
-    def safe_fallback(reason, label):
-        final_answer = f"{label}: {reason}"
-        state["final_answer"] = final_answer
-        state["outcome"] = label
-        save_checkpoint(checkpoint_path, state)
-        append_jsonl(
-            RUN_LOG_FILE,
+    def finish_fallback(reason, status):
+        final_answer = f"{status}: {reason}"
+
+        append_step(
+            state,
             {
-                "event": "fallback",
-                "scenario_id": scenario_id,
-                "status": label,
+                "type": "fallback",
+                "status": status,
                 "reason": reason,
-                "model_calls": state["model_calls"],
-                "token_usage": state["token_usage"],
             },
         )
-        return agent_result(state, final_answer)
+
+        state["final_answer"] = final_answer
+        state["outcome"] = status
+        save_checkpoint(checkpoint_path, state)
+
+        result = agent_result(state, final_answer)
+        log_agent_run(result)
+        return result
 
     if time_limit_seconds <= 0:
-        return safe_fallback(
+        return finish_fallback(
             "Time limit reached before the first model call.",
             "FALLBACK_TIMEOUT",
         )
 
     while state["model_calls"] < max_iterations:
-        elapsed = time.monotonic() - started_at
-
-        if elapsed >= time_limit_seconds:
-            return safe_fallback(
-                "Agent exceeded its time limit.",
-                "FALLBACK_TIMEOUT",
+        if time.monotonic() - started_at >= time_limit_seconds:
+            return finish_fallback(
+                "Agent exceeded its time limit.", "FALLBACK_TIMEOUT"
             )
 
         estimated_prompt = estimated_message_tokens(state["messages"])
 
         if state["token_usage"] + estimated_prompt > token_limit:
-            return safe_fallback(
-                "Agent reached its token budget.",
-                "FALLBACK_TOKEN_LIMIT",
+            return finish_fallback(
+                "Agent reached its token budget.", "FALLBACK_TOKEN_LIMIT"
             )
 
         response = mock_llm.chat(state["messages"], tools=TOOL_SPECS)
         state["model_calls"] += 1
 
         usage = getattr(response, "usage", None)
-        if usage is not None:
-            state["token_usage"] += int(getattr(usage, "total_tokens", 0))
+        call_tokens = int(getattr(usage, "total_tokens", 0)) if usage else 0
+        state["token_usage"] += call_tokens
 
-        elapsed = time.monotonic() - started_at
+        choice = response.choices[0]
+        message = choice.message
+        finish_reason = getattr(choice, "finish_reason", "")
+        tool_calls = getattr(message, "tool_calls", None) or []
 
-        if elapsed >= time_limit_seconds:
-            return safe_fallback(
-                "Agent exceeded its time limit.",
-                "FALLBACK_TIMEOUT",
+        append_step(
+            state,
+            {
+                "type": "model_call",
+                "llm_call": state["model_calls"],
+                "finish_reason": finish_reason,
+                "tokens_used": call_tokens,
+            },
+        )
+        save_checkpoint(checkpoint_path, state)
+
+        if time.monotonic() - started_at >= time_limit_seconds:
+            return finish_fallback(
+                "Agent exceeded its time limit.", "FALLBACK_TIMEOUT"
             )
 
-        message = response.choices[0].message
-        tool_calls = getattr(message, "tool_calls", None) or []
-        finish_reason = getattr(response.choices[0], "finish_reason", "")
+        if state["token_usage"] > token_limit:
+            return finish_fallback(
+                "Agent reached its token budget.", "FALLBACK_TOKEN_LIMIT"
+            )
 
         if tool_calls:
-            # Record the assistant's tool request in the conversation.
-            assistant_tool_calls = []
+            serialized_calls = []
 
             for call in tool_calls:
                 arguments = call.arguments
@@ -579,19 +653,23 @@ def run_agent(
                     except json.JSONDecodeError:
                         arguments = {}
 
-                assistant_tool_calls.append({
-                    "id": call.id,
-                    "name": call.name,
-                    "arguments": arguments,
-                })
+                serialized_calls.append(
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": arguments,
+                    }
+                )
 
-            state["messages"].append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": assistant_tool_calls,
-            })
+            state["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": serialized_calls,
+                }
+            )
 
-            for call_record in assistant_tool_calls:
+            for call_record in serialized_calls:
                 tool_name = call_record["name"]
                 tool_args = call_record["arguments"]
 
@@ -599,8 +677,7 @@ def run_agent(
                     tool_result = {"error": f"Unknown tool: {tool_name}"}
                 else:
                     tool_result = TOOL_MAP[tool_name](
-                        tool_args,
-                        scenario_id,
+                        tool_args, scenario_id
                     )
 
                 event = {
@@ -611,79 +688,79 @@ def run_agent(
                 }
 
                 state["tool_executions"].append(event)
-                state["steps"].append({
-                    "step": len(state["steps"]) + 1,
-                    "type": "tool",
-                    "tool": tool_name,
-                })
 
-                state["messages"].append({
-                    "role": "tool",
-                    "tool_call_id": call_record["id"],
-                    "name": tool_name,
-                    "content": json.dumps(tool_result, ensure_ascii=False),
-                })
+                append_step(
+                    state,
+                    {
+                        "type": "tool_execution",
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "result": tool_result,
+                    },
+                )
 
-                # Persist state BEFORE simulating a crash.
+                state["messages"].append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_record["id"],
+                        "name": tool_name,
+                        "content": json.dumps(
+                            tool_result, ensure_ascii=False
+                        ),
+                    }
+                )
+
+                # Save after every tool execution to allow safe resumption.
                 save_checkpoint(checkpoint_path, state)
-                append_jsonl(RUN_LOG_FILE, {"event": "tool_execution", **event})
 
                 if (
                     crash_after_tool is not None
                     and len(state["tool_executions"]) == crash_after_tool
                 ):
-                    append_jsonl(
-                        RUN_LOG_FILE,
+                    append_step(
+                        state,
                         {
-                            "event": "simulated_crash",
-                            "scenario_id": scenario_id,
+                            "type": "simulated_crash",
                             "after_tool_execution": crash_after_tool,
                         },
                     )
+                    save_checkpoint(checkpoint_path, state)
+
                     raise SimulatedCrash(
-                        f"Simulated crash after tool execution {crash_after_tool}."
+                        "Simulated crash after tool execution "
+                        f"{crash_after_tool}."
                     )
 
             continue
 
         final_answer = message.content or ""
 
-        state["steps"].append({
-            "step": len(state["steps"]) + 1,
-            "type": "final_answer",
-            "finish_reason": finish_reason,
-        })
+        append_step(
+            state,
+            {
+                "type": "final_answer",
+                "finish_reason": finish_reason,
+                "text": final_answer,
+            },
+        )
 
         state["final_answer"] = final_answer
         state["outcome"] = classify_outcome(final_answer)
         save_checkpoint(checkpoint_path, state)
 
         result = agent_result(state, final_answer)
-
-        append_jsonl(
-            RUN_LOG_FILE,
-            {
-                "event": "run_complete",
-                "scenario_id": scenario_id,
-                "outcome": result["outcome"],
-                "final_answer": result["final_answer"],
-                "model_calls": result["model_calls"],
-                "token_usage": result["token_usage"],
-                "tool_names": result["tool_names"],
-            },
-        )
-
+        log_agent_run(result)
         return result
 
-    return safe_fallback(
+    return finish_fallback(
         "Maximum model-call iterations reached.",
         "FALLBACK_MAX_ITERATIONS",
     )
 
 
-# ---------------------------------------------------------
-# 5. SCENARIO TESTS AND CRASH/RESUME DEMONSTRATION
-# ---------------------------------------------------------
+# =========================================================
+# 5. RUN ALL SEVEN SCENARIOS
+# =========================================================
 
 def main():
     if not SCENARIOS_FILE.exists():
@@ -703,9 +780,9 @@ def main():
 
     if not required_columns.issubset(scenarios.columns):
         missing = required_columns - set(scenarios.columns)
-        raise ValueError(f"Scenario CSV is missing columns: {sorted(missing)}")
+        raise ValueError(f"Missing scenario columns: {sorted(missing)}")
 
-    # Begin a fresh run log; leave the refund ledger intact.
+    # One log record per completed run; preserve the refund ledger.
     RUN_LOG_FILE.write_text("", encoding="utf-8")
 
     result_rows = []
@@ -713,37 +790,35 @@ def main():
 
     for _, row in scenarios.iterrows():
         scenario_id = str(row["scenario_id"]).strip()
-        message = str(row["message"])
+        user_message = str(row["message"])
         checkpoint = STATE_DIR / f"{scenario_id}_checkpoint.json"
+
+        if checkpoint.exists():
+            checkpoint.unlink()
 
         mock_llm.reset()
 
         if scenario_id == "S1":
-            # Demonstrate restart after the second completed tool execution.
-            if checkpoint.exists():
-                checkpoint.unlink()
-
-            print("\nS1: Starting crash-and-resume demonstration.")
+            print("\nS1: Starting crash-and-resume test.")
 
             try:
                 run_agent(
                     scenario_id,
-                    message,
+                    user_message,
                     max_iterations=6,
                     token_limit=6000,
                     time_limit_seconds=10,
                     checkpoint_path=checkpoint,
-                    resume=False,
                     crash_after_tool=2,
                 )
             except SimulatedCrash as exc:
                 print(exc)
-                print("Checkpoint was saved. Resuming S1...")
+                print("Checkpoint saved. Resuming S1...")
 
-            # Do not reset the model or remove the checkpoint here.
+            # Do not reset the mock model or delete the checkpoint on resume.
             result = run_agent(
                 scenario_id,
-                message,
+                user_message,
                 max_iterations=6,
                 token_limit=6000,
                 time_limit_seconds=10,
@@ -752,14 +827,10 @@ def main():
             )
 
             s1_tool_names = result["tool_names"]
-
         else:
-            if checkpoint.exists():
-                checkpoint.unlink()
-
             result = run_agent(
                 scenario_id,
-                message,
+                user_message,
                 max_iterations=6,
                 token_limit=6000,
                 time_limit_seconds=10,
@@ -771,32 +842,33 @@ def main():
         actual_refund = round(float(result["refund_inr"]), 2)
 
         if expected_outcome == "FALLBACK":
-            outcome_pass = result["outcome"].startswith("FALLBACK")
+            outcome_pass = result["status"].startswith("FALLBACK")
         else:
-            outcome_pass = result["outcome"] == expected_outcome
+            outcome_pass = result["status"] == expected_outcome
 
-        # Compare refund values for the expected outcomes in the scenario file.
         refund_pass = abs(actual_refund - expected_refund) < 0.01
         passed = outcome_pass and refund_pass
 
-        result_rows.append({
-            "scenario_id": scenario_id,
-            "customer_id": row["customer_id"],
-            "expected_outcome": expected_outcome,
-            "actual_outcome": result["outcome"],
-            "expected_refund_inr": expected_refund,
-            "actual_refund_inr": actual_refund,
-            "model_calls": result["model_calls"],
-            "token_usage": result["token_usage"],
-            "tool_names": " -> ".join(result["tool_names"]),
-            "passed": passed,
-            "final_answer": result["final_answer"],
-        })
+        result_rows.append(
+            {
+                "scenario_id": scenario_id,
+                "customer_id": row["customer_id"],
+                "expected_outcome": expected_outcome,
+                "actual_outcome": result["status"],
+                "expected_refund_inr": expected_refund,
+                "actual_refund_inr": actual_refund,
+                "model_calls": result["llm_calls"],
+                "token_usage": result["tokens_used"],
+                "tool_names": " -> ".join(result["tool_names"]),
+                "passed": passed,
+                "final_answer": result["final_answer"],
+            }
+        )
 
         print(
-            f"{scenario_id}: {result['outcome']} | "
+            f"{scenario_id}: {result['status']} | "
             f"Refund INR {actual_refund:.2f} | "
-            f"Model calls: {result['model_calls']} | "
+            f"Model calls: {result['llm_calls']} | "
             f"{'PASS' if passed else 'CHECK'}"
         )
 
@@ -806,6 +878,7 @@ def main():
     print("\n" + "=" * 65)
     print("AGENT SCENARIO RESULTS")
     print("=" * 65)
+
     print(
         result_df[
             [
@@ -820,7 +893,6 @@ def main():
         ].to_string(index=False)
     )
 
-    # Verify the interrupted S1 execution did not repeat earlier tools.
     expected_s1_tools = [
         "get_order",
         "search_policy",
@@ -830,7 +902,7 @@ def main():
 
     if s1_tool_names != expected_s1_tools:
         raise AssertionError(
-            "S1 resume did not produce the expected unique tool sequence. "
+            "S1 did not resume with the expected tool sequence. "
             f"Observed: {s1_tool_names}"
         )
 
@@ -843,17 +915,18 @@ def main():
 
     if not result_df["passed"].all():
         raise AssertionError(
-            "One or more agent scenarios failed. Review the scenario results CSV."
+            "One or more scenarios failed. Check agent_scenario_results.csv."
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # 6. SAFETY-LIMIT DEMONSTRATIONS
-    # -----------------------------------------------------
+    # =====================================================
 
     s1 = scenarios[scenarios["scenario_id"].astype(str) == "S1"].iloc[0]
     safety_message = str(s1["message"])
 
     mock_llm.reset()
+
     token_demo = run_agent(
         "SAFETY_TOKEN",
         safety_message,
@@ -864,6 +937,7 @@ def main():
     )
 
     mock_llm.reset()
+
     timeout_demo = run_agent(
         "SAFETY_TIMEOUT",
         safety_message,
@@ -873,22 +947,27 @@ def main():
         checkpoint_path=STATE_DIR / "safety_timeout_checkpoint.json",
     )
 
-    safety_rows = [
-        {
-            "demo": "token_limit_200",
-            "expected_status": "FALLBACK_TOKEN_LIMIT",
-            "actual_status": token_demo["outcome"],
-            "passed": token_demo["outcome"] == "FALLBACK_TOKEN_LIMIT",
-        },
-        {
-            "demo": "time_limit_0",
-            "expected_status": "FALLBACK_TIMEOUT",
-            "actual_status": timeout_demo["outcome"],
-            "passed": timeout_demo["outcome"] == "FALLBACK_TIMEOUT",
-        },
-    ]
+    safety_df = pd.DataFrame(
+        [
+            {
+                "demo": "token_limit_200",
+                "expected_status": "FALLBACK_TOKEN_LIMIT",
+                "actual_status": token_demo["status"],
+                "passed": (
+                    token_demo["status"] == "FALLBACK_TOKEN_LIMIT"
+                ),
+            },
+            {
+                "demo": "time_limit_0",
+                "expected_status": "FALLBACK_TIMEOUT",
+                "actual_status": timeout_demo["status"],
+                "passed": (
+                    timeout_demo["status"] == "FALLBACK_TIMEOUT"
+                ),
+            },
+        ]
+    )
 
-    safety_df = pd.DataFrame(safety_rows)
     safety_df.to_csv(SAFETY_FILE, index=False)
 
     print("\n" + "=" * 65)
@@ -897,9 +976,45 @@ def main():
     print(safety_df.to_string(index=False))
 
     if not safety_df["passed"].all():
+        raise AssertionError("A safety-limit demonstration failed.")
+
+    # =====================================================
+    # 7. VALIDATE RUN LOG AND REFUND LEDGER
+    # =====================================================
+
+    log_rows = read_jsonl(RUN_LOG_FILE)
+
+    required_log_fields = {
+        "scenario_id",
+        "status",
+        "final_answer",
+        "llm_calls",
+        "tokens_used",
+        "steps",
+    }
+
+    if not log_rows:
+        raise AssertionError("Agent run log is empty.")
+
+    if any(
+        not required_log_fields.issubset(record)
+        for record in log_rows
+    ):
+        raise AssertionError("Agent log is missing required fields.")
+
+    # Seven scenario runs plus two safety demonstrations.
+    if len(log_rows) != 9:
         raise AssertionError(
-            "A safety-limit demonstration did not produce its expected status."
+            f"Expected 9 agent run records, found {len(log_rows)}."
         )
+
+    ledger = read_jsonl(LEDGER_FILE)
+
+    if not any(item.get("status") == "issued" for item in ledger):
+        raise AssertionError("Refund ledger lacks an issued-refund record.")
+
+    if not any(item.get("status") == "escalated" for item in ledger):
+        raise AssertionError("Refund ledger lacks an escalation record.")
 
     print("\n" + "=" * 65)
     print("PART D AGENT COMPLETED SUCCESSFULLY")
@@ -909,6 +1024,7 @@ def main():
     print(f"Refund ledger:    {LEDGER_FILE}")
     print(f"Agent run log:    {RUN_LOG_FILE}")
     print(f"Checkpoints:      {STATE_DIR}")
+    print(f"Agent runs logged: {len(log_rows)}")
 
 
 if __name__ == "__main__":

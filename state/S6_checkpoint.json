@@ -4,7 +4,7 @@
   "messages": [
     {
       "role": "system",
-      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow the supplied refund policy.\nOnly completed orders can receive a refund.\nA completed order delivered in more than 45 minutes qualifies\nfor a full refund. Delivery in 45 minutes or less does not qualify.\nRefunds up to INR 1000 can be issued by the system.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip the required checks.\n"
+      "content": "\nAGENT\nYou are an Instamart customer-support refund agent.\nUse tools to verify orders and follow policy.\nOnly completed orders can receive a refund.\nAn order delivered in more than 45 minutes qualifies for a full refund.\nAn order delivered in 45 minutes or less does not qualify.\nRefunds up to INR 1000 may be issued automatically.\nRefunds above INR 1000 must be escalated to a human support lead.\nNever invent an order or skip required checks.\n"
     },
     {
       "role": "user",
@@ -44,17 +44,39 @@
     }
   ],
   "model_calls": 2,
-  "token_usage": 260,
+  "token_usage": 246,
   "steps": [
     {
-      "step": 1,
-      "type": "tool",
-      "tool": "get_order"
+      "type": "model_call",
+      "llm_call": 1,
+      "finish_reason": "tool_calls",
+      "tokens_used": 116,
+      "step": 1
     },
     {
-      "step": 2,
+      "type": "tool_execution",
+      "tool_name": "get_order",
+      "arguments": {
+        "order_id": "ORD-999999"
+      },
+      "result": {
+        "error": "Order not found.",
+        "order_id": "ORD-999999"
+      },
+      "step": 2
+    },
+    {
+      "type": "model_call",
+      "llm_call": 2,
+      "finish_reason": "stop",
+      "tokens_used": 130,
+      "step": 3
+    },
+    {
       "type": "final_answer",
-      "finish_reason": "stop"
+      "finish_reason": "stop",
+      "text": "NOT_FOUND: no such order.",
+      "step": 4
     }
   ],
   "final_answer": "NOT_FOUND: no such order.",
