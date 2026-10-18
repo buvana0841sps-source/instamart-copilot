@@ -1,8 +1,6 @@
-
 from pathlib import Path
 import re
 
-import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -68,7 +66,7 @@ def make_chunks(overlap=10):
 
 
 def retrieve_chunks(question, overlap=10, k=3):
-    """Return the top-k policy chunks using TF-IDF and cosine similarity."""
+    """Retrieve the top-k chunks using TF-IDF and cosine similarity."""
     chunks = make_chunks(overlap)
 
     if not chunks:
@@ -86,10 +84,7 @@ def retrieve_chunks(question, overlap=10, k=3):
         key=lambda i: (-scores[i], i)
     )
 
-    return [
-        chunks[i]
-        for i in ranked_indices[:k]
-    ]
+    return [chunks[i] for i in ranked_indices[:k]]
 
 
 def normalize_source(value):
@@ -99,7 +94,7 @@ def normalize_source(value):
 
 
 def contains_expected_source(expected, retrieved):
-    """Check whether any expected source is in the retrieved top-k."""
+    """Check whether an expected source appears in the retrieved chunks."""
     if not expected or str(expected).strip().lower() in {
         "none", "nan", "null"
     }:
@@ -119,7 +114,7 @@ def contains_expected_source(expected, retrieved):
 
 
 def get_answer_text(result):
-    """Extract answer text from the policy assistant's return value."""
+    """Extract answer text from the policy assistant's result."""
     if isinstance(result, tuple):
         return str(result[0])
 
@@ -132,19 +127,12 @@ def get_answer_text(result):
 
 
 def looks_like_fallback(response):
-    """Check the required fallback prefix."""
-    return str(response).strip().lower().startswith(
-        "i could not find"
-    )
+    """Check whether the response uses the required fallback prefix."""
+    return str(response).strip().lower().startswith("i could not find")
 
 
 def answer_with_overlap(question, overlap=0, k=3):
-    """
-    Generate a fresh answer using chunks with the requested overlap.
-
-    This lets the evaluation test the actual answer produced from
-    zero-overlap context, not just the source filenames.
-    """
+    """Generate a fresh answer using chunks with the requested overlap."""
     selected = retrieve_chunks(question, overlap=overlap, k=k)
 
     context = "\n".join(
@@ -164,9 +152,7 @@ def answer_with_overlap(question, overlap=0, k=3):
         },
         {
             "role": "user",
-            "content": (
-                f"CONTEXT:\n{context}\nQUESTION:\n{question}"
-            )
+            "content": f"CONTEXT:\n{context}\nQUESTION:\n{question}"
         }
     ]
 
@@ -188,14 +174,16 @@ def main():
     question_col = find_column(
         df, ["question", "user_question", "query"]
     )
+
     expected_doc_col = find_column(
         df,
         [
-            "expected_doc", "expected_document",
-            "expected_source", "expected_policy", "source_file"
+            "expected_doc", "expected_document", "expected_source",
+            "expected_policy", "source_file"
         ],
         required=False
     )
+
     expected_fact_col = find_column(
         df,
         [
@@ -204,6 +192,7 @@ def main():
         ],
         required=False
     )
+
     answerable_col = find_column(
         df, ["answerable", "is_answerable"], required=False
     )
@@ -215,9 +204,7 @@ def main():
         )
 
     if len(df) != 14:
-        print(
-            f"NOTICE: Expected 14 questions; found {len(df)}."
-        )
+        print(f"NOTICE: Expected 14 questions; found {len(df)}.")
 
     results = []
 
@@ -236,9 +223,8 @@ def main():
         else:
             answerable = bool(expected_doc and expected_fact)
 
-        # Normal assistant: use the default 10-word overlap.
-        normal_answer_result = answer(question)
-        normal_answer = get_answer_text(normal_answer_result)
+        # Normal answer uses the assistant's normal retrieval method.
+        normal_answer = get_answer_text(answer(question))
 
         normal_chunks = retrieve_chunks(
             question, overlap=10, k=3
@@ -247,8 +233,7 @@ def main():
             chunk["source"] for chunk in normal_chunks
         ]
 
-        # Zero-overlap assistant: generate a separate answer
-        # from context built with 40-word chunks and no overlap.
+        # Generate a fresh answer using chunks with zero overlap.
         zero_answer, zero_sources = answer_with_overlap(
             question, overlap=0, k=3
         )
@@ -260,23 +245,19 @@ def main():
             expected_doc, zero_sources
         )
 
-        # The assignment asks for a case-sensitive substring check.
+        # Required case-sensitive substring checks.
         normal_fact_hit = (
-            bool(expected_fact)
-            and expected_fact in normal_answer
+            bool(expected_fact) and expected_fact in normal_answer
         )
         zero_fact_hit = (
-            bool(expected_fact)
-            and expected_fact in zero_answer
+            bool(expected_fact) and expected_fact in zero_answer
         )
 
         normal_fallback_hit = (
-            not answerable
-            and looks_like_fallback(normal_answer)
+            not answerable and looks_like_fallback(normal_answer)
         )
         zero_fallback_hit = (
-            not answerable
-            and looks_like_fallback(zero_answer)
+            not answerable and looks_like_fallback(zero_answer)
         )
 
         results.append({
@@ -284,13 +265,11 @@ def main():
             "answerable": answerable,
             "expected_doc": expected_doc,
             "expected_fact": expected_fact,
-
             "top3_sources": " | ".join(normal_sources),
             "expected_doc_in_top3": normal_source_hit,
             "expected_fact_in_answer": normal_fact_hit,
             "answer": normal_answer,
             "fallback_correct": normal_fallback_hit,
-
             "zero_overlap_sources": " | ".join(zero_sources),
             "zero_overlap_expected_doc_in_top3": zero_source_hit,
             "zero_overlap_expected_fact_in_answer": zero_fact_hit,
@@ -299,30 +278,12 @@ def main():
         })
 
         print(f"\nQuestion {index + 1}: {question}")
-        print(
-            "Normal overlap sources:",
-            normal_sources
-        )
-        print(
-            "Normal expected document hit:",
-            normal_source_hit
-        )
-        print(
-            "Normal expected fact hit:",
-            normal_fact_hit
-        )
-        print(
-            "Zero-overlap sources:",
-            zero_sources
-        )
-        print(
-            "Zero-overlap expected document hit:",
-            zero_source_hit
-        )
-        print(
-            "Zero-overlap expected fact hit:",
-            zero_fact_hit
-        )
+        print("Normal overlap sources:", normal_sources)
+        print("Normal expected document hit:", normal_source_hit)
+        print("Normal expected fact hit:", normal_fact_hit)
+        print("Zero-overlap sources:", zero_sources)
+        print("Zero-overlap expected document hit:", zero_source_hit)
+        print("Zero-overlap expected fact hit:", zero_fact_hit)
         print("Zero-overlap answer:", zero_answer)
 
     results_df = pd.DataFrame(results)
@@ -331,23 +292,15 @@ def main():
     output_file = OUTPUT_DIR / "policy_eval_results.csv"
     results_df.to_csv(output_file, index=False)
 
-    answerable_results = results_df[
-        results_df["answerable"]
-    ]
-    unanswerable_results = results_df[
-        ~results_df["answerable"]
-    ]
+    answerable_results = results_df[results_df["answerable"]]
+    unanswerable_results = results_df[~results_df["answerable"]]
 
     zero_answerable_fact_failures = answerable_results[
-        ~answerable_results[
-            "zero_overlap_expected_fact_in_answer"
-        ]
+        ~answerable_results["zero_overlap_expected_fact_in_answer"]
     ]
 
     zero_answerable_source_failures = answerable_results[
-        ~answerable_results[
-            "zero_overlap_expected_doc_in_top3"
-        ]
+        ~answerable_results["zero_overlap_expected_doc_in_top3"]
     ]
 
     print("\n" + "=" * 60)
@@ -373,29 +326,23 @@ def main():
 
     print(
         "Zero overlap: expected document in top 3:",
-        int(
-            answerable_results[
-                "zero_overlap_expected_doc_in_top3"
-            ].sum()
-        ),
+        int(answerable_results[
+            "zero_overlap_expected_doc_in_top3"
+        ].sum()),
         "/", len(answerable_results)
     )
     print(
         "Zero overlap: expected fact in answer:",
-        int(
-            answerable_results[
-                "zero_overlap_expected_fact_in_answer"
-            ].sum()
-        ),
+        int(answerable_results[
+            "zero_overlap_expected_fact_in_answer"
+        ].sum()),
         "/", len(answerable_results)
     )
     print(
         "Zero overlap: correct unanswerable fallback:",
-        int(
-            unanswerable_results[
-                "zero_overlap_fallback_correct"
-            ].sum()
-        ),
+        int(unanswerable_results[
+            "zero_overlap_fallback_correct"
+        ].sum()),
         "/", len(unanswerable_results)
     )
 
@@ -411,21 +358,18 @@ def main():
 
     if not zero_answerable_fact_failures.empty:
         print("\nAnswerable zero-overlap fact failure examples:")
+
         for _, item in zero_answerable_fact_failures.iterrows():
             print("Question:", item["question"])
             print("Expected fact:", item["expected_fact"])
-            print(
-                "Retrieved sources:",
-                item["zero_overlap_sources"]
-            )
+            print("Retrieved sources:", item["zero_overlap_sources"])
             print("Zero-overlap answer:", item["zero_overlap_answer"])
 
-    if zero_answerable_fact_failures.empty:
+    else:
         print(
             "\nNo answerable expected-fact failures were observed "
             "with the current zero-overlap chunks and prompts. "
-            "Do not claim a chunk-boundary failure until one is "
-            "verified."
+            "Do not claim a chunk-boundary failure until one is verified."
         )
 
     print(f"\nDetailed results saved to: {output_file}")

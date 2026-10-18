@@ -5,6 +5,7 @@ from pathlib import Path
 import contextlib
 import io
 import json
+import sqlite3
 import time
 
 import pandas as pd
@@ -25,6 +26,7 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 STATE_DIR = BASE_DIR / "state"
 
 ORDERS_FILE = DATA_DIR / "clean" / "orders.csv"
+DB_FILE = DATA_DIR / "instamart.db"
 SCENARIOS_FILE = DATA_DIR / "raw" / "agent_scenarios.csv"
 
 LEDGER_FILE = OUTPUT_DIR / "refund_ledger.jsonl"
@@ -35,42 +37,50 @@ SAFETY_FILE = OUTPUT_DIR / "agent_safety_demos.csv"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-if not ORDERS_FILE.exists():
-    raise FileNotFoundError(f"Orders file not found: {ORDERS_FILE}")
-
-orders_df = pd.read_csv(ORDERS_FILE, keep_default_na=False)
-orders_df["order_id"] = orders_df["order_id"].astype(str).str.strip()
-
-if orders_df["order_id"].duplicated().any():
-    raise ValueError("Cleaned orders contain duplicate order IDs.")
+if not DB_FILE.exists():
+    raise FileNotFoundError(f"Database not found: {DB_FILE}")
 
 
 def get_order_record(order_id):
-    """Look up one order in the cleaned order dataset."""
+    """Look up one order in the SQLite database."""
     order_id = str(order_id).strip()
-    matches = orders_df[orders_df["order_id"] == order_id]
 
-    if matches.empty:
+    with sqlite3.connect(DB_FILE) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT order_id, customer_id, product_id, status,
+                   order_amount, delivery_minutes
+            FROM orders
+            WHERE CAST(order_id AS TEXT) = ?
+            LIMIT 1
+            """,
+            (order_id,),
+        ).fetchone()
+
+    if row is None:
         return None
 
-    row = matches.iloc[0]
-
     try:
-        amount = float(row["order_amount"])
+        amount = (
+            float(row["order_amount"])
+            if row["order_amount"] not in (None, "")
+            else None
+        )
     except (TypeError, ValueError):
         amount = None
 
     try:
         delivery = (
             float(row["delivery_minutes"])
-            if str(row["delivery_minutes"]).strip()
+            if row["delivery_minutes"] not in (None, "")
             else None
         )
     except (TypeError, ValueError):
         delivery = None
 
     return {
-        "order_id": order_id,
+        "order_id": str(row["order_id"]),
         "customer_id": str(row["customer_id"]),
         "product_id": str(row["product_id"]),
         "status": str(row["status"]).strip().lower(),
@@ -256,6 +266,8 @@ def tool_issue_refund(args, scenario_id):
             }
 
     ledger_entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tool_name": "issue_refund",
         "scenario_id": scenario_id,
         "order_id": order_id,
         "customer_id": order["customer_id"],
@@ -321,6 +333,8 @@ def tool_escalate_to_human(args, scenario_id):
             }
 
     ledger_entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tool_name": "escalate_to_human",
         "scenario_id": scenario_id,
         "order_id": order_id,
         "customer_id": order["customer_id"],
