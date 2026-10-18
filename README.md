@@ -228,7 +228,7 @@ Seven SQL queries are saved in `sql/queries.sql` and run against `data/instamart
 
 | Query | Finding | Result |
 |---|---|---:|
-| Q1 — `WHERE` then `HAVING` | Customers with qualifying completed orders and total qualifying spend above the threshold | 30 customers |
+| Q1 — `WHERE` then `HAVING` | Completed orders with order_amount > INR 500; retain customers whose total qualifying spend exceeds INR 8,000. | 30 customers |
 | Q2 — Three-table join | Revenue by city and product category | 30 city-category rows; total INR 2,998,668.80 |
 | Q2 — Highest revenue cell | Bengaluru / Electronics | INR 233,909.45 |
 | Q3 — Scalar subquery | Products priced above average catalogue price | 11 products |
@@ -348,7 +348,7 @@ Cluster IDs are labels only; they do not imply a ranking from best to worst. Pre
 
 The first two principal components explained approximately 85.23% of the variance in the scaled RFM matrix: PC1 = 63.43%, PC2 = 21.80%.
 
-`outputs/customer_segments.csv` contains the customer ID, recency, frequency, monetary value, segment ID, segment name, and Premium flag.
+outputs/customer_segments.csv contains customer_id, recency, frequency, monetary, segment_id, segment_name, and is_premium.
 
 ### Customer lapse prediction
 
