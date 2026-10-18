@@ -430,7 +430,7 @@ Oversampling the lapsed class in the training data changed Logistic Regression m
 
 Recall moved the most, increasing by about 0.19, while precision decreased slightly. This means the model identifies more lapsing customers but also risks sending more loyal customers into retention campaigns.
 
-The selected model was saved to `outputs/lapse_model.joblib`, reloaded with `joblib.load`, and reproduced the original test predictions exactly. Among test-set customers who are in the Premium segment, the top 10 by predicted lapse probability were written to `outputs/retention_list.csv` with columns `customer_id`, `lapse_probability`, and `actually_lapsed`; one of the ten was labelled lapsed. were written to `outputs/retention_list.csv` with columns `customer_id`, `lapse_probability`, and `actually_lapsed`; one of the ten was labelled lapsed.
+The selected model was saved to `outputs/lapse_model.joblib`, reloaded with `joblib.load`, and reproduced the original test predictions exactly. Among test-set customers who are in the Premium segment, the top 10 by predicted lapse probability were written to `outputs/retention_list.csv` with columns `customer_id`, `lapse_probability`, and `actually_lapsed`; one of the ten was labelled lapsed.
 
 **Retention-list caveat:** The Premium flag uses whole-window monetary value, including September. The retention list is illustrative and is not a leakage-free prospective evaluation of Premium customer targeting.
 
