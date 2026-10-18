@@ -172,7 +172,7 @@ The raw audit identified 120 order amounts that could not be converted to number
 - City names were trimmed and converted to title case, standardising 24 raw spellings to six cities.
 - The raw gender spellings were mapped to `male`, `female`, or `unknown`; 30 blank gender values were represented as `unknown`.
 - The final gender counts were 610 female, 560 male, and 30 unknown.
-- Ages were converted to numeric values. Missing ages and ages outside the 10–100 range were treated as missing, then imputed using the median age within the customer's city.
+- Ages were converted to numeric values. The 61 blank ages and 6 out-of-range ages (67 values in total) were treated as missing, then imputed using the median age within the customer's city.
 - The clean customer table has no missing ages, and its final age range is 18–60.
 - `signup_date` was parsed as a date.
 - Final customer rows: 1,200.
@@ -195,7 +195,7 @@ The raw audit identified 120 order amounts that could not be converted to number
 
 - Order timestamps were parsed as dates and times.
 - The 119 exact duplicate rows were removed.
-- Records were ordered by timestamp, and 656 older records were removed by keeping the latest record for each order ID.
+- Records were ordered by timestamp, and older records were removed by keeping the latest record for each order ID.
 - The clean order table contains 12,309 unique orders and no pending records.
 - Quantity, discount, order amount, and delivery duration were converted to numeric values.
 - Missing or invalid order amounts were recalculated using `price_inr × quantity × (1 − discount_pct / 100)`, rounded to two decimal places.
@@ -348,7 +348,7 @@ Cluster IDs are labels only; they do not imply a ranking from best to worst. Pre
 
 The first two principal components explained approximately 85.23% of the variance in the scaled RFM matrix: PC1 = 63.43%, PC2 = 21.80%.
 
-outputs/customer_segments.csv contains customer_id, recency, frequency, monetary, segment_id, segment_name, and is_premium.
+`outputs/customer_segments.csv` contains `customer_id`, `recency`, `frequency`, `monetary`, `segment_id`, `segment_name`, and `is_premium`.
 
 ### Customer lapse prediction
 
@@ -396,7 +396,7 @@ The Random Forest was selected for the persisted model because it had the better
 
 **Preprocessing and leakage prevention**
 
-The model features are recency, frequency, monetary value, average discount percentage, cancellation rate, average delivery time, most frequent product category, city, age, gender, and tenure in days. They use only orders dated before 2025-09-01; orders from 2025-09-01 onwards were excluded from the features. Segment labels were not used as model features. Numeric features are standardised with StandardScaler, and categorical features (city, gender, and favourite category) are one-hot encoded using OneHotEncoder(drop="first", handle_unknown="ignore"). The transformations are included in a ColumnTransformer and Pipeline. The train/test split happens before fitting preprocessing or model steps, so preprocessing is fitted on training data and applied to test data. Oversampling was applied only to training data, and the original test set remained unchanged. The feature table contained no missing values.
+The model features are recency, frequency, monetary value, average discount percentage, cancellation rate, average delivery time, most frequent product category, city, age, gender, and tenure in days. They use only orders dated before 2025-09-01; orders from 2025-09-01 onwards were excluded from the features. Segment labels were not used as model features. Numeric features are standardised with `StandardScaler`, and categorical features (city, gender, and favourite category) are one-hot encoded using `OneHotEncoder(drop="first", handle_unknown="ignore")`. The transformations are included in a `ColumnTransformer` and `Pipeline`. The train/test split happens before fitting preprocessing or model steps, so preprocessing is fitted on training data and applied to test data. Oversampling was applied only to training data, and the original test set remained unchanged. The feature table contained no missing values.
 
 The fitted scaler's training-set mean for frequency was 8.1147, compared with the full-cohort mean of 8.0285. These differ because the scaler was fitted on the training subset, not on the full cohort.
 
@@ -556,6 +556,7 @@ With zero overlap, two answerable questions failed the expected-fact check:
 2. **Question:** “How soon is money returned when a payment fails but is deducted?” The zero-overlap answer omitted the expected fact “48 hours.”
 
 With zero overlap, the relevant source document was still present in the top three retrieved chunks, but the selected chunk context did not provide the complete expected fact to the answer generator. Without overlapping words between adjacent chunks, a relevant detail near a chunk boundary may be omitted from the selected context. This explains why the expected-fact check failed for the delivery-time and payment-return questions even though their expected source documents were retrieved.
+
 Both unanswerable questions — the mascot's favourite colour and the cricket World Cup final winner — received the correct fallback answer: `I could not find that information in the policy documents.`
 
 The evaluation results are stored in `outputs/policy_eval_results.csv`.
@@ -605,7 +606,7 @@ The four tool executions were not repeated, and the completed S1 run used five m
 | S1 with `token_limit=200` | `FALLBACK_TOKEN_LIMIT` | `FALLBACK_TOKEN_LIMIT` | 2 | 279 |
 | S1 with `time_limit_seconds=0` | `FALLBACK_TIMEOUT` | `FALLBACK_TIMEOUT` | 0 | 0 |
 
-The token-limit run recorded 279 response tokens over two model calls, exceeding the configured limit of 200. The agent returned FALLBACK_TOKEN_LIMIT before proceeding with another model call or tool execution. With time_limit_seconds=0, the agent returned FALLBACK_TIMEOUT without making a model call.
+The token-limit run recorded 279 response tokens over two model calls, exceeding the configured limit of 200. The agent returned FALLBACK_TOKEN_LIMIT before proceeding with another model call or tool execution. With `time_limit_seconds=0`, the agent returned FALLBACK_TIMEOUT without making a model call.
 
 Agent outputs include `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl`, `outputs/agent_scenario_results.csv`, `outputs/agent_safety_demos.csv`, and checkpoint files under `state/`.
 
